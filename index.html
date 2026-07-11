@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hardwood 3D</title>
+<title>Hardwood 3D — v1.1a</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&family=Source+Sans+3:wght@300;400;600&display=swap" rel="stylesheet">
 <style>
@@ -26,8 +26,22 @@ canvas{display:block}
 
 // ============================================================
 // HARDWOOD 3D — Basketball Simulation (Three.js port)
+// v1.1a
+//
 // Simulation logic ported from the 2D canvas original; rendering
 // layer rebuilt in true 3D with a tilted broadcast-style camera.
+//
+// v1.1a changes:
+//  - Fixed a duplicate-player bug: restarting the game (Space from the
+//    menu or game-over screen) used to rebuild both rosters AND their
+//    Three.js meshes from scratch every time, without ever removing the
+//    previous meshes from the scene. Rosters/meshes are now built once
+//    per page load (Game.teamsBuilt) and every restart just resets state
+//    on the same 10 player objects (Game.resetExistingPlayers()).
+//  - Added Game.validateRosterSizes() as a standing invariant check
+//    (exactly 5 players per team) to protect future roster-touching
+//    features (substitutions, injuries, foul-outs, etc.).
+//  - Reorganized/commented the init & reset flow for clarity.
 // ============================================================
 
 // ------------------------------------------------------------
@@ -1202,8 +1216,22 @@ const Game = {
   foulRetainTeam: null,
   pendingFT: null,
 
+  // Rosters and their 3D meshes are created exactly ONCE per page load
+  // (see teamsBuilt / setupTeams below). Every subsequent call to init()
+  // — which happens whenever the player restarts from the menu or the
+  // game-over screen — only resets state on the SAME player objects.
+  // Never recreate players or call buildPlayer3D() again after the first
+  // build: buildPlayer3D() adds a mesh to the Three.js scene, and those
+  // meshes are never removed, so rebuilding rosters on every restart was
+  // silently piling up extra "ghost" players on the court forever.
+  teamsBuilt: false,
+
   init() {
-    this.setupTeams();
+    if (!this.teamsBuilt) {
+      this.setupTeams();
+      this.teamsBuilt = true;
+    }
+    this.resetExistingPlayers();
     this.resetPositions();
     Ball.reset(47, 25);
     this.score = { home: 0, away: 0 };
@@ -1216,10 +1244,12 @@ const Game = {
     this.fouls = { home: 0, away: 0 };
     this.foulRetainTeam = null;
     this.pendingFT = null;
-    for (const p of this.allPlayers()) { p.fouls = 0; p.firedOut = false; p.streak = 0; p.energy = CFG.STAMINA_MAX; }
     Floats.length = 0;
     Particles.length = 0;
   },
+
+  // Builds the two five-player rosters and their persistent 3D meshes.
+  // MUST run only once per page load — guarded by teamsBuilt in init().
   setupTeams() {
     this.home = [
       createPlayer('home','PG',1, 47, 25),
@@ -1235,6 +1265,7 @@ const Game = {
       createPlayer('away','PF',4, 29, 18),
       createPlayer('away','C', 5, 29, 32),
     ];
+    this.validateRosterSizes();
     this.setOffensivePositions(this.home, 'right');
     this.setOffensivePositions(this.away, 'left');
     for (let i = 0; i < 5; i++) {
@@ -1242,6 +1273,35 @@ const Game = {
       this.away[i].assignIdx = i;
     }
     for (const p of this.allPlayers()) buildPlayer3D(p);
+  },
+
+  // Defensive invariant: exactly 5 players per team, always. Cheap check
+  // that runs once at roster-build time so future features (substitutions,
+  // fouling out replacements, injuries, etc.) can't silently break this
+  // assumption without at least a console warning to flag it.
+  validateRosterSizes() {
+    if (this.home.length !== 5 || this.away.length !== 5) {
+      console.warn(`[Hardwood] Roster size invariant violated — home:${this.home.length} away:${this.away.length} (expected 5 each)`);
+    }
+  },
+
+  // Resets per-player game state (fouls, stamina, streaks, momentum,
+  // possession/control flags) on the EXISTING player objects created by
+  // setupTeams(). No players or meshes are ever created here — this is
+  // what keeps mesh/player counts stable across any number of restarts.
+  resetExistingPlayers() {
+    for (const p of this.allPlayers()) {
+      p.fouls = 0;
+      p.firedOut = false;
+      p.streak = 0;
+      p.streakTimer = 0;
+      p.energy = CFG.STAMINA_MAX;
+      p.fatigued = false;
+      p.hasBall = false;
+      p.isControlled = false;
+      p.vx = 0; p.vy = 0;
+      p.state = 'idle';
+    }
   },
   setOffensivePositions(team, side) {
     const sign = side === 'right' ? 1 : -1;
@@ -1252,6 +1312,10 @@ const Game = {
     team[3].offPos = { x: base + sign*32, y: 18 };
     team[4].offPos = { x: base + sign*34, y: 32 };
   },
+  // Single source of truth for "every player currently in the game" — a
+  // fresh 10-element array (5 home + 5 away) each call. Always read
+  // rosters through this rather than concatenating this.home/this.away
+  // manually elsewhere, so the 5-per-team invariant stays in one place.
   allPlayers() { return [...this.home, ...this.away]; },
   getAttackBasket(team) {
     return team === 'home' ? { x: CFG.BASKET_RX, y: CFG.BASKET_Y } : { x: CFG.BASKET_LX, y: CFG.BASKET_Y };
@@ -1259,6 +1323,9 @@ const Game = {
   getDefendBasket(team) {
     return team === 'home' ? { x: CFG.BASKET_LX, y: CFG.BASKET_Y } : { x: CFG.BASKET_RX, y: CFG.BASKET_Y };
   },
+  // Re-places the existing 10 player objects into a fresh inbounding
+  // formation (called after scores, turnovers, quarter starts, etc.).
+  // Mutates positions/velocity/state in place — never creates players.
   resetPositions() {
     const offTeam = this.possession === 'home' ? this.home : this.away;
     const defTeam = this.possession === 'home' ? this.away : this.home;
