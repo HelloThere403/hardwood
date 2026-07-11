@@ -712,8 +712,25 @@ function buildPlayer3D(p) {
   shadowMesh.rotation.x = -PI/2; shadowMesh.position.y = 0.015;
   g.add(shadowMesh);
 
-  scene.add(g);
-  p._mesh = { group:g, body, head, ring, energyRing, glowSprite, foulSprite, lastFouls:-1, bodyMat, headMat };
+  // Remove any old mesh for this player before creating a new one
+if (p._mesh && p._mesh.group) {
+  scene.remove(p._mesh.group);
+}
+
+scene.add(g);
+
+p._mesh = {
+  group: g,
+  body,
+  head,
+  ring,
+  energyRing,
+  glowSprite,
+  foulSprite,
+  lastFouls: -1,
+  bodyMat,
+  headMat
+};
 }
 
 function updatePlayer3D(p) {
